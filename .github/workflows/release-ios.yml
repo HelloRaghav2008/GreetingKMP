@@ -1,0 +1,84 @@
+name: Release iOS framework
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout KMP repo
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build XCFramework
+        run: |
+          chmod +x gradlew
+          ./gradlew :shared:assembleSharedReleaseXCFramework
+
+      - name: Zip and compute checksum
+        id: zip
+        working-directory: shared/build/XCFrameworks/release
+        run: |
+          zip -r Shared.xcframework.zip Shared.xcframework
+          echo "checksum=$(swift package compute-checksum Shared.xcframework.zip)" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            shared/build/XCFrameworks/release/Shared.xcframework.zip \
+            --title "${{ github.ref_name }}" \
+            --notes "iOS framework ${{ github.ref_name }}"
+
+      - name: Checkout Package repo
+        uses: actions/checkout@v4
+        with:
+          repository: HelloRaghav2008/GreetingKMPPackage
+          token: ${{ secrets.PACKAGE_REPO_TOKEN }}
+          path: package-repo
+
+      - name: Update Package.swift and tag
+        working-directory: package-repo
+        run: |
+          VERSION="${{ github.ref_name }}"
+          URL="https://github.com/${{ github.repository }}/releases/download/${VERSION}/Shared.xcframework.zip"
+          cat > Package.swift <<EOF
+          // swift-tools-version:5.3
+          import PackageDescription
+
+          let package = Package(
+              name: "Shared",
+              platforms: [.iOS(.v15)],
+              products: [
+                  .library(name: "Shared", targets: ["Shared"])
+              ],
+              targets: [
+                  .binaryTarget(
+                      name: "Shared",
+                      url: "${URL}",
+                      checksum: "${{ steps.zip.outputs.checksum }}"
+                  )
+              ]
+          )
+          EOF
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add Package.swift
+          git commit -m "Release ${VERSION}"
+          git tag "${VERSION}"
+          git push origin HEAD --tags
